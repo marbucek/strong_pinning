@@ -6,7 +6,7 @@ from plotting import plot_optimizer_trajectories
 
 ERROR_r = 1e-10
 
-def sliding(system, initial_r, R, max_step, optimizer, write_log = False):
+def sliding(system, initial_r, R, optimizer, max_step, write_log = False, run_to_end = False):
 
     delta_r_norm = np.infty
     delta_r = np.nan
@@ -41,6 +41,8 @@ def sliding(system, initial_r, R, max_step, optimizer, write_log = False):
 
         if min(eigenvalues) < 0:
             jump = True
+            if not run_to_end:
+                return None, None, None, jump, None, (None, None)
 
         if optimizer == 'Hess':
             H_steps += 1

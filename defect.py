@@ -6,6 +6,8 @@ import copy
 import matplotlib.pyplot as plt
 from optimizer import sliding
 from plotting import *
+from numba import jit, jitclass
+import numba
 
 ERROR_BOUND = 1e-10
 
@@ -35,8 +37,6 @@ def d2f_p(r):
     d2f_p = diff(df_p(r_sym), r_sym)
     d2f_p = lambdify(r_sym, d2f_p)
     return d2f_p(r)
-
-
 
 class two_defects():
 
@@ -106,8 +106,9 @@ class two_defects():
         if initialize_r:
             self.r = np.array([*R, *R]).astype(np.float64)
 
-def refine_jumps(system, b, r_jumps, r_no_jumps, R_jumps, R_no_jumps, e_jumps, e_no_jumps, lambdas, sliding_coeff):
+def refine_jumps(system, b, r_jump, r_no_jump, R_jumps, R_no_jumps, e_jump, e_no_jumps, lambdas, max_step):
 
+    e_jumps = [e_jump];
     #evaluate missing information
     try:
         delta_R_no_jump = R_no_jumps[-1] - R_no_jumps[-2]
@@ -117,19 +118,21 @@ def refine_jumps(system, b, r_jumps, r_no_jumps, R_jumps, R_no_jumps, e_jumps, e
         delta_R_jump = R_jumps[-2] - R_jumps[-1]
     except:
         delta_R_jump = np.infty
-    assert delta_R_no_jump > 0 and delta_R_jump > 0
 
-    step_sliding = sliding_coeff*LA.norm(r_jumps[-1] - r_no_jumps[-1])
+    #calculate additional energy for the branch after jump
+    delta_R = min(delta_R_jump, delta_R_no_jump)
+    r_jump, e_jump, lambda_min, jump, delta_r, (r_trajectory1, r_sliding1) = sliding(system, initial_r = r_jump, R = [R_jumps[-1] - delta_R, b],
+        optimizer = 'Hess', max_step = max_step)
+    if not jump:
+        R_jumps.append(R_jumps[-1] - delta_R);
+        e_jumps.append(e_jump)
+
     if delta_R_no_jump > delta_R_jump:
-        r, energy, lambda_min, jump, delta_r, (r_trajectory1, r_sliding1) = sliding(system, initial_r = r_no_jumps[-1], R = [R_no_jumps[-1] - delta_R_jump, b],
-            max_step = step_sliding, optimizer = 'Hess', write_log = False)
+        #further refinement of the pinned branch
+        r_no_jump, e_no_jump, lambda_min, jump, delta_r, (r_trajectory1, r_sliding1) = sliding(system, initial_r = r_no_jump, R = [R_no_jumps[-1] - delta_R_jump, b],
+            optimizer = 'Hess', max_step = max_step)
         if not jump:
-            R_no_jumps.insert(-1,R_no_jumps[-1] - delta_R_jump); r_no_jumps.insert(-1,r); e_no_jumps.insert(-1,energy); lambdas.insert(-1, lambda_min)
-    else:
-        r, energy, lambda_min, jump, delta_r, (r_trajectory1, r_sliding1) = sliding(system, initial_r = r_jumps[-1], R = [R_jumps[-1] + delta_R_no_jump, b],
-            max_step = step_sliding, optimizer = 'Hess', write_log = False)
-        if not jump:
-            R_jumps.insert(-1,R_jumps[-1] + delta_R_no_jump); r_jumps.insert(-1,r); e_jumps.insert(-1,energy);
+            R_no_jumps.insert(-1,R_no_jumps[-1] - delta_R_jump); e_no_jumps.insert(-1,e_no_jump); lambdas.insert(-1, lambda_min)
 
     def slope(x,y):
         return (y[1] - y[0])/(x[1] - x[0])
@@ -145,11 +148,11 @@ def refine_jumps(system, b, r_jumps, r_no_jumps, R_jumps, R_no_jumps, e_jumps, e
 
         if delta_x1 > 0 and delta_x2 > 0:
 
-            r_last_no_jump = (delta_x2**0.5*r_no_jumps[-1] - delta_x1**0.5*r_no_jumps[-2])/(delta_x2**0.5 - delta_x1**0.5)
+            #r_last_no_jump = (delta_x2**0.5*r_no_jumps[-1] - delta_x1**0.5*r_no_jumps[-2])/(delta_x2**0.5 - delta_x1**0.5)
 
             lambdas.append(0)
             R_no_jumps.append(R_last_no_jump)
-            r_no_jumps.append(r_last_no_jump)
+            #r_no_jumps.append(r_last_no_jump)
             e_no_jumps.append(e_last_no_jump)
 
             if len(R_jumps) > 1:
@@ -157,24 +160,22 @@ def refine_jumps(system, b, r_jumps, r_no_jumps, R_jumps, R_no_jumps, e_jumps, e
                 e_jumps_slope = slope(R_jumps[-2:],e_jumps[-2:])
                 e_first_jump = e_jumps[-1] + e_jumps_slope*(R_last_no_jump - R_jumps[-1])
 
-                r_jumps_slope = slope(R_jumps[-2:],r_jumps[-2:])
-                r_first_jump = r_jumps[-1] + r_jumps_slope*(R_last_no_jump - R_jumps[-1])
+                #r_jumps_slope = slope(R_jumps[-2:],r_jumps[-2:])
+                #r_first_jump = r_jumps[-1] + r_jumps_slope*(R_last_no_jump - R_jumps[-1])
 
                 R_jumps.append(R_last_no_jump)
                 e_jumps.append(e_first_jump)
-                r_jumps.append(r_first_jump)
+                #r_jumps.append(r_first_jump)
 
-    r_jumps.reverse(); R_jumps.reverse(); e_jumps.reverse()
+    return R_jumps, R_no_jumps, e_jumps, e_no_jumps, lambdas
 
-    return np.stack(r_jumps), np.stack(r_no_jumps), np.stack(R_jumps), np.stack(R_no_jumps), np.array(e_jumps), np.array(e_no_jumps), np.array(lambdas)
+def binary_search(system, b, R_jump, R_no_jump, e_no_jump, r_no_jump, lambda_no_jump, max_step, plotting = None):
 
-def binary_search(system, b, R_jump, R_no_jump, e_jump, e_no_jump, r_jump, r_no_jump, lambda_no_jump, sliding_coeff, plotting = None):
-
-    r_jumps = []; r_no_jumps = []; e_jumps = []; e_no_jumps = []; R_jumps = []; R_no_jumps = []; lambdas = [];
+    r_no_jumps = []; e_no_jumps = []; R_jumps = []; R_no_jumps = []; lambdas = [];
 
     R_no_jumps.append(R_no_jump); R_jumps.append(R_jump);
-    e_no_jumps.append(e_no_jump); e_jumps.append(e_jump);
-    r_no_jumps.append(r_no_jump); r_jumps.append(r_jump);
+    e_no_jumps.append(e_no_jump);
+    r_no_jumps.append(r_no_jump.copy());
     lambdas.append(lambda_no_jump)
 
     steps = 0
@@ -184,31 +185,20 @@ def binary_search(system, b, R_jump, R_no_jump, e_jump, e_no_jump, r_jump, r_no_
         steps += 1
         R_try = 0.5*(R_jump + R_no_jump)
 
-        step_sliding = sliding_coeff*LA.norm(r_jump - r_no_jump)
         r, energy, lambda_min, jump, delta_r, (r_trajectory1, r_sliding1) = sliding(system, initial_r = r_no_jump, R = [R_try, b],
-            max_step = step_sliding, optimizer = 'Hess', write_log = False)
-        r2, energy2, lambda_min2, jump2, delta_r, (r_trajectory2, r_sliding2) = sliding(system, initial_r = r_jump, R = [R_try, b],
-            max_step = step_sliding, optimizer = 'Hess', write_log = False)
+            optimizer = 'Hess', max_step = max_step, write_log = False)
 
         if not jump:
-
             R_no_jumps.append(R_try); R_no_jump = R_try
             e_no_jumps.append(energy); e_no_jump = energy
-            r_no_jumps.append(r); r_no_jump = r
+            r_no_jumps.append(r.copy()); r_no_jump = r.copy()
             lambdas.append(lambda_min)
             system.r = r.copy()
 
         else:
-
             R_jumps.append(R_try); R_jump = R_try
-            e_jumps.append(energy); e_jump = energy
-            r_jumps.append(r)
-            r_jump = r.copy()
 
-        if plotting is not None:
-            plot_bsearch_step(r_trajectory1, r_sliding1, R_jumps, R_no_jumps, e_jumps, e_no_jumps, lambdas, jump, N = -plotting)
-
-    return R_jumps, R_no_jumps, e_jumps, e_no_jumps, r_jumps, r_no_jumps, lambdas, steps
+    return R_jumps, R_no_jumps, e_no_jumps, r_no_jumps, lambdas, steps
 
 
 def is_jump(system, interval, N, b = 0, sliding_coeff = 0.01):
@@ -227,7 +217,7 @@ def is_jump(system, interval, N, b = 0, sliding_coeff = 0.01):
         initialize_r = False
 
         r, energy, lambda_min, jump, _, (r_trajectory, r_sliding) = sliding(system, initial_r = system.r.copy(), R = [R, b],
-                            max_step = step_R*sliding_coeff, optimizer = 'Hess')
+                            optimizer = 'Hess')
 
         system.r = r.copy()
         R += step_R
@@ -237,12 +227,10 @@ def is_jump(system, interval, N, b = 0, sliding_coeff = 0.01):
 
     return False
 
-
-
 def force(system,interval,N, b = 0, sliding_coeff = 0.01, optimizer = 'Hess', draw_landscapes = False, plotting = None, message = True):
 
     step_R = (interval[-1] - interval[0])/(N-1)
-
+    max_step = step_R*sliding_coeff
 
     r_values = []; R_values = []; energy_values = []; Delta_e = []; R_jump_ids = [];
 
@@ -255,34 +243,44 @@ def force(system,interval,N, b = 0, sliding_coeff = 0.01, optimizer = 'Hess', dr
         initialize_r = False
 
         r, energy, lambda_min, jump, _, (r_trajectory, r_sliding) = sliding(system, initial_r = system.r.copy(), R = [R, b],
-                            max_step = step_R*sliding_coeff, optimizer = optimizer)
+                            max_step = max_step, optimizer = optimizer)
 
 
         if not jump:
 
             R_values.append(R); R_no_jump = R
             energy_values.append(energy); e_no_jump = energy
-            r_values.append(r)
+            r_values.append(r.copy())
             lambda_no_jump = lambda_min
             system.r = r.copy()
             R += step_R
 
         else:
 
-            R_jumps, R_no_jumps, e_jumps, e_no_jumps, r_jumps, r_no_jumps, lambdas, steps = binary_search(system, b, R, R_no_jump, energy, e_no_jump, r,
-                                                                                                system.r.copy(), lambda_no_jump, sliding_coeff, plotting)
+            R_jumps, R_no_jumps, e_no_jumps, r_no_jumps, lambdas, steps = binary_search(system, b, R, R_no_jump, e_no_jump, system.r.copy(), lambda_no_jump, max_step, plotting)
+
             R_values.extend(R_no_jumps);
             R_jump_ids.append(len(R_values) - 1);
-            R_values.extend([R_jumps[-1], R_jumps[-1]])
-            energy_values.extend(e_no_jumps); energy_values.extend([e_jumps[-1], e_jumps[-1]])
-            r_values.extend(r_no_jumps); r_values.append([np.nan, np.nan, np.nan, np.nan]); r_values.append(r_jumps[-1])
+            energy_values.extend(e_no_jumps);
+            r_values.extend(r_no_jumps);
+
+            r_jump, e_jump, _, jump, _, (r_trajectory, r_sliding) = sliding(system, initial_r = r_no_jumps[-1], R = [R_jumps[-1], b],
+                                max_step = step_R*sliding_coeff, optimizer = optimizer, run_to_end = True) #only here we actually do the sliding
+            if not jump:
+                raise Exception('Did not jump after the binary search. Shutting down.')
+
+            R_values.extend([np.nan, R_jumps[-1]])
+            energy_values.extend([np.nan, e_jump])
+            r_values.extend([np.array(4*[np.nan]),r_jump.copy()])
 
             R_no_jump = R_jumps[-1]
-            R = R_jumps[-1] + step_R
-            system.r = r_jumps[-1]
+            R = R_no_jump + step_R
+            system.r = r_jump.copy()
 
-            r_jumps, r_no_jumps, R_jumps, R_no_jumps, e_jumps, e_no_jumps, lambdas = refine_jumps(system, b, r_jumps, r_no_jumps, R_jumps, R_no_jumps, e_jumps, e_no_jumps, lambdas, sliding_coeff)
-            Delta_e_new = e_no_jumps[-1] - e_jumps[0]
+            R_jumps, R_no_jumps, e_jumps, e_no_jumps, lambdas = refine_jumps(system, b, r_jump, r_no_jumps[-1], R_jumps, R_no_jumps, e_jump, e_no_jumps, lambdas, max_step)
+
+            Delta_e_new = e_no_jumps[-1] - e_jumps[-1]
+            #last check if something went wrong
             if  Delta_e_new < 0:
                 Delta_e.append(np.nan)
             else:
