@@ -8,11 +8,13 @@ from optimizer import sliding
 from plotting import *
 from numba import jit, jitclass
 import numba
+import inspect
 
 ERROR_BOUND = 1e-10
 
 def e_p(r):
-    return -1/(1 + r**2/2)
+    potential = -1/(1 + np.sum(np.power(r,2))/2)
+    return potential
 
 def f_p(r):
     r_sym = Symbol('r_sym')
@@ -100,13 +102,50 @@ class two_defects():
         self.grad = lambda r, R: np.array(self.grad_eq(self.g, self.C, *r, *R, *self.Delta_R))
         self.hess = lambda r, R: np.array(self.hess_eq(self.g, self.C, *r, *R, *self.Delta_R))
 
-    def place_vortices(self,R, initialize_r = False):
-        self.R = np.array(R).astype(np.float64)
+    # def place_vortices(self,R, initialize_r = False):
+    #     self.R = np.array(R).astype(np.float64)
+    #
+    #     if initialize_r:
+    #         self.r = np.array([*R, *R]).astype(np.float64)
 
-        if initialize_r:
-            self.r = np.array([*R, *R]).astype(np.float64)
+def elastic_energy(u1, u2, C, g):
+    '''
+        u1, u2  symbolic vectors of vortex displacement
+        returns elastic energy of the effective two-vortex system
+    '''
 
-def refine_jumps(system, b, r_jump, r_no_jump, R_jumps, R_no_jumps, e_jump, e_no_jumps, lambdas, max_step):
+    energy = 1/2*C/(1-g**2)*np.sum(u1**2 + u2**2 - 2*g*u1*u2)
+
+    return energy
+
+def get_functions(g, kappa, Delta, type = 'Lorentzian'):
+
+    g_s = Symbol('g'); C_s = Symbol('C');
+    X = Symbol('X');  Y = Symbol('Y'); R = np.array([X, Y])
+    Delta_X = Symbol('Delta_X'); Delta_Y = Symbol('Delta_Y'); Delta_s = np.array([Delta_X, Delta_Y])
+    r1_x = Symbol('r1_x');  r1_y = Symbol('r1_y');
+    r2_x = Symbol('r2_x');  r2_y = Symbol('r2_y');
+    r1 = np.array([r1_x, r1_y])
+    r2 = np.array([r2_x, r2_y])
+
+    energy = e_p(r1) + e_p(r2) + elastic_energy(r1 - (R - Delta_s/2), r2 - (R + Delta_s/2), C_s, g_s)
+    grad = np.array([diff(energy, var) for var in [*r1, *r2]])
+    hess = np.array(hessian(energy,[*r1, *r2]))
+
+    all_vars = [g_s, C_s, *r1, *r2, *R, *Delta_s]
+
+    energy_eq = lambdify(all_vars,energy)
+    grad_eq = lambdify(all_vars,grad)
+    hess_eq = lambdify(all_vars,hess)
+
+    C = 0.25/kappa #to be replaced by a more generic formula
+    energy = lambda r, R: energy_eq(g, C, *r, *R, *Delta)
+    grad = lambda r, R: np.array(grad_eq(g, C, *r, *R, *Delta))
+    hess = lambda r, R: np.array(hess_eq(g, C, *r, *R, *Delta))
+
+    return energy, grad, hess
+
+def refine_jumps(energy_f, grad, hess, b, r_jump, r_no_jump, R_jumps, R_no_jumps, e_jump, e_no_jumps, lambdas, max_step):
 
     e_jumps = [e_jump];
     #evaluate missing information
@@ -121,7 +160,7 @@ def refine_jumps(system, b, r_jump, r_no_jump, R_jumps, R_no_jumps, e_jump, e_no
 
     #calculate additional energy for the branch after jump
     delta_R = min(delta_R_jump, delta_R_no_jump)
-    r_jump, e_jump, lambda_min, jump, delta_r, (r_trajectory1, r_sliding1) = sliding(system, initial_r = r_jump, R = [R_jumps[-1] - delta_R, b],
+    r_jump, e_jump, lambda_min, jump, delta_r, (r_trajectory1, r_sliding1) = sliding(energy_f, grad, hess, initial_r = r_jump, R = [R_jumps[-1] - delta_R, b],
         optimizer = 'Hess', max_step = max_step)
     if not jump:
         R_jumps.append(R_jumps[-1] - delta_R);
@@ -129,7 +168,7 @@ def refine_jumps(system, b, r_jump, r_no_jump, R_jumps, R_no_jumps, e_jump, e_no
 
     if delta_R_no_jump > delta_R_jump:
         #further refinement of the pinned branch
-        r_no_jump, e_no_jump, lambda_min, jump, delta_r, (r_trajectory1, r_sliding1) = sliding(system, initial_r = r_no_jump, R = [R_no_jumps[-1] - delta_R_jump, b],
+        r_no_jump, e_no_jump, lambda_min, jump, delta_r, (r_trajectory1, r_sliding1) = sliding(energy_f, grad, hess, initial_r = r_no_jump, R = [R_no_jumps[-1] - delta_R_jump, b],
             optimizer = 'Hess', max_step = max_step)
         if not jump:
             R_no_jumps.insert(-1,R_no_jumps[-1] - delta_R_jump); e_no_jumps.insert(-1,e_no_jump); lambdas.insert(-1, lambda_min)
@@ -169,7 +208,7 @@ def refine_jumps(system, b, r_jump, r_no_jump, R_jumps, R_no_jumps, e_jump, e_no
 
     return R_jumps, R_no_jumps, e_jumps, e_no_jumps, lambdas
 
-def binary_search(system, b, R_jump, R_no_jump, e_no_jump, r_no_jump, lambda_no_jump, max_step, plotting = None):
+def binary_search(energy_f, grad, hess, b, R_jump, R_no_jump, e_no_jump, r_no_jump, lambda_no_jump, max_step, plotting = None):
 
     r_no_jumps = []; e_no_jumps = []; R_jumps = []; R_no_jumps = []; lambdas = [];
 
@@ -185,7 +224,7 @@ def binary_search(system, b, R_jump, R_no_jump, e_no_jump, r_no_jump, lambda_no_
         steps += 1
         R_try = 0.5*(R_jump + R_no_jump)
 
-        r, energy, lambda_min, jump, delta_r, (r_trajectory1, r_sliding1) = sliding(system, initial_r = r_no_jump, R = [R_try, b],
+        r, energy, lambda_min, jump, delta_r, (r_trajectory1, r_sliding1) = sliding(energy_f, grad, hess, initial_r = r_no_jump, R = [R_try, b],
             optimizer = 'Hess', max_step = max_step, write_log = False)
 
         if not jump:
@@ -193,7 +232,7 @@ def binary_search(system, b, R_jump, R_no_jump, e_no_jump, r_no_jump, lambda_no_
             e_no_jumps.append(energy); e_no_jump = energy
             r_no_jumps.append(r.copy()); r_no_jump = r.copy()
             lambdas.append(lambda_min)
-            system.r = r.copy()
+            #system.r = r.copy()
 
         else:
             R_jumps.append(R_try); R_jump = R_try
@@ -227,22 +266,22 @@ def is_jump(system, interval, N, b = 0, sliding_coeff = 0.01):
 
     return False
 
-def force(system,interval,N, b = 0, sliding_coeff = 0.01, optimizer = 'Hess', draw_landscapes = False, plotting = None, message = True):
+def force(energy_f, grad, hess, interval,N, b = 0.0, sliding_coeff = 0.01, optimizer = 'Hess', draw_landscapes = False, plotting = None, message = True):
 
     step_R = (interval[-1] - interval[0])/(N-1)
     max_step = step_R*sliding_coeff
 
     r_values = []; R_values = []; energy_values = []; Delta_e = []; R_jump_ids = [];
 
-    R = interval[0]
-    initialize_r = True
+    R = float(interval[0])
+    r_no_jump = np.array([R,b,R,b])
 
     while R < interval[-1]:
 
-        system.place_vortices([R, b], initialize_r)
-        initialize_r = False
+        # system.place_vortices([R, b], initialize_r)
+        # initialize_r = False
 
-        r, energy, lambda_min, jump, _, (r_trajectory, r_sliding) = sliding(system, initial_r = system.r.copy(), R = [R, b],
+        r, energy, lambda_min, jump, _, (r_trajectory, r_sliding) = sliding(energy_f, grad, hess, initial_r = r_no_jump, R = [R, b],
                             max_step = max_step, optimizer = optimizer)
 
 
@@ -252,19 +291,19 @@ def force(system,interval,N, b = 0, sliding_coeff = 0.01, optimizer = 'Hess', dr
             energy_values.append(energy); e_no_jump = energy
             r_values.append(r.copy())
             lambda_no_jump = lambda_min
-            system.r = r.copy()
+            r_no_jump = r.copy()
             R += step_R
 
         else:
 
-            R_jumps, R_no_jumps, e_no_jumps, r_no_jumps, lambdas, steps = binary_search(system, b, R, R_no_jump, e_no_jump, system.r.copy(), lambda_no_jump, max_step, plotting)
+            R_jumps, R_no_jumps, e_no_jumps, r_no_jumps, lambdas, steps = binary_search(energy_f, grad, hess, b, R, R_no_jump, e_no_jump, r_no_jump, lambda_no_jump, max_step, plotting)
 
             R_values.extend(R_no_jumps);
             R_jump_ids.append(len(R_values) - 1);
             energy_values.extend(e_no_jumps);
             r_values.extend(r_no_jumps);
 
-            r_jump, e_jump, _, jump, _, (r_trajectory, r_sliding) = sliding(system, initial_r = r_no_jumps[-1], R = [R_jumps[-1], b],
+            r_jump, e_jump, _, jump, _, (r_trajectory, r_sliding) = sliding(energy_f, grad, hess, initial_r = r_no_jumps[-1], R = [R_jumps[-1], b],
                                 max_step = step_R*sliding_coeff, optimizer = optimizer, run_to_end = True) #only here we actually do the sliding
             if not jump:
                 raise Exception('Did not jump after the binary search. Shutting down.')
@@ -275,9 +314,9 @@ def force(system,interval,N, b = 0, sliding_coeff = 0.01, optimizer = 'Hess', dr
 
             R_no_jump = R_jumps[-1]
             R = R_no_jump + step_R
-            system.r = r_jump.copy()
+            r_no_jump = r_jump.copy()
 
-            R_jumps, R_no_jumps, e_jumps, e_no_jumps, lambdas = refine_jumps(system, b, r_jump, r_no_jumps[-1], R_jumps, R_no_jumps, e_jump, e_no_jumps, lambdas, max_step)
+            R_jumps, R_no_jumps, e_jumps, e_no_jumps, lambdas = refine_jumps(energy_f, grad, hess, b, r_jump, r_no_jumps[-1], R_jumps, R_no_jumps, e_jump, e_no_jumps, lambdas, max_step)
 
             Delta_e_new = e_no_jumps[-1] - e_jumps[-1]
             #last check if something went wrong

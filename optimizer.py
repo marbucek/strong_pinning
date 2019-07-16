@@ -3,19 +3,20 @@ import numpy.linalg as LA
 from matplotlib import pyplot as plt
 import nelder_mead as ND
 from plotting import plot_optimizer_trajectories
+import inspect
 
 ERROR_r = 1e-10
 
-def sliding(system, initial_r, R, optimizer, max_step, write_log = False, run_to_end = False):
+def sliding(energy_f, grad_f, hess_f, initial_r, R, optimizer, max_step, write_log = False, run_to_end = False):
 
     delta_r_norm = np.infty
     delta_r = np.nan
     r_error = np.infty
     jump = False
 
-    energy_fun = lambda r_var: system.energy(r_var, R)
-    grad_fun = lambda r_var: system.grad(r_var, R)
-    hess_fun = lambda r_var: system.hess(r_var, R)
+    energy_fun = lambda r_var: energy_f(r_var, R)
+    grad_fun = lambda r_var: grad_f(r_var, R)
+    hess_fun = lambda r_var: hess_f(r_var, R)
 
     r_trajectory = []; r_sliding = []
 
